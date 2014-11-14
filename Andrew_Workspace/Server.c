@@ -230,10 +230,13 @@ int main(int argc, char *argv[])
 		}
 
 		// Check and see if the port number is in range.
-		else if (ntohs(packet_in.port_num) < 10085 || ntohs(packet_in.port_num) > 10089)
+		else if (ntohs(packet_in.port_num) < (10010 + (packet_in.GID_client * 5)) 
+			|| ntohs(packet_in.port_num) > (10010 + (packet_in.GID_client * 5) + 4))
 		{
-			printf("Error: Port number was '%d' this is not in range of [10085, 10089]\n", 
-				ntohs(packet_in.port_num));
+			printf("Error: Port number was '%d' this is not in range of [", 
+				ntohs(packet_in.port_num)); 
+			printf("%d, %d]\n", 10010 + packet_in.GID_client * 5, 
+				10010 + packet_in.GID_client * 5 + 4);
 
 			tx_error tx_err_port;
 
@@ -270,7 +273,7 @@ int main(int argc, char *argv[])
 				// Indicate client is waiting, save IP and Port numbers
 				client_waiting = TRUE;
 				saved_port = ntohs(packet_in.port_num);
-				saved_IP = their_addr.sin_addr.s_addr;
+				saved_IP = htonl(their_addr.sin_addr.s_addr);
 					
 				if (DEBUG) {
 					printf("No Client is waiting.\n");
@@ -308,10 +311,6 @@ int main(int argc, char *argv[])
 					printf("A client is already waiting, sending match making info.\n");
 				}
 				
-				// Indicate client is waiting, save IP and Port numbers
-				client_waiting = FALSE;
-				saved_port = 0;
-				saved_IP = 0;
 				
 				// Create a TX_Pair packet
 				tx_pair tx_pair_packet;
@@ -330,6 +329,11 @@ int main(int argc, char *argv[])
 					exit(1);
 				}
 
+				// Clear the IP and port info.
+				client_waiting = FALSE;
+				saved_port = 0;
+				saved_IP = 0;
+				
 				printf("Sending packet to client with match making info.\n");		
 
 			}

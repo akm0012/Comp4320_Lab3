@@ -19,54 +19,93 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/wait.h>
+#include <signal.h>
 
-#define GROUP_PORT "10025"    // Port should be 10010 + Group ID (15)
+#define BACKLOG 10	 // how many pending connections queue will hold
+
+
 #define MAX_MESSAGE_LEN 1024
 #define MAX_PACKET_LEN 1029	// 1Kb for message, and 5 bytes for header
 #define GROUP_ID 15 
 
-#define DEBUG 0	// Used for debugging 1 = ON, 0 = OFF
+#define DEBUG 1	// Used for debugging 1 = ON, 0 = OFF
 
-// Prototypes
-unsigned char calculate_checksum(unsigned char *, int); 
-unsigned short make_short(unsigned char, unsigned char); 
 
 // Struct that will be used to send data to the Server
-struct dns_packet_to_send
+struct transmitted_packet
 {
-	unsigned short TML;
-	unsigned char checksum;
-	unsigned char group_ID;
-	unsigned char request_ID;
-	char payload[MAX_MESSAGE_LEN];
+	unsigned short magic_num;
+	unsigned char GID_client;
+	unsigned short port_num;
 } __attribute__((__packed__));
 
-typedef struct dns_packet_to_send dns_packet;
+typedef struct transmitted_packet tx_packet;
 
 // Struct that will be used to recieve unverified incoming packets.
 struct incoming_unverified_packet
 {
-	unsigned char b1;
-	unsigned char b2;
-	unsigned char b3;
-	unsigned char b4;
-	unsigned char b5;
-	unsigned int extra[MAX_MESSAGE_LEN];
+	unsigned short short_1;
+	unsigned char char_2;
+	unsigned char extra_char[6];
 } __attribute__((__packed__));
 
-typedef struct incoming_unverified_packet rx_check;
+typedef struct incoming_unverified_packet rx_verify;
 
 // Struct that wil be used after the incoming packet has been verified.
-struct incoming_verified_packet
+// Indicates we need to wait for another client
+struct incoming_verified_packet_wait
 {
-	unsigned short length;
-	unsigned char checksum;
-	unsigned char GID;
-	unsigned char RID;
-	unsigned int payload[MAX_MESSAGE_LEN];
+	unsigned short magic_num;
+	unsigned char GID_server;
+	unsigned short port_num;
 } __attribute__((__packed__));
 
-typedef struct incoming_verified_packet rx_packet;
+typedef struct incoming_verified_packet_wait rx_wait;
+
+// Struct that wil be used after the incoming packet has been verified.
+// Indicates we can pair with another client
+struct incoming_verified_packet_pair
+{
+	unsigned short magic_num;
+	unsigned char GID_server;
+	unsigned int IP_addr;
+	unsigned short port_num;
+} __attribute__((__packed__));
+
+typedef struct incoming_verified_packet_pair rx_pair;
+
+// Struct that wil be used if we recieve an error
+struct incoming_error_packet
+{
+	unsigned short magic_num;
+	unsigned char GID_server;
+	unsigned short error_code;
+} __attribute__((__packed__));
+
+typedef struct incoming_error_packet rx_error;
+
+// Prototypes
+unsigned short make_short(unsigned char, unsigned char);
+unsigned int make_int(unsigned char, unsigned char, 
+	unsigned char, unsigned char);
+int create_and_run_TCP_server(tx_packet);
+
+void sigchld_handler(int s)
+{
+	while(waitpid(-1, NULL, WNOHANG) > 0);
+}
+
+// get sockaddr, IPv4 or IPv6:
+void *get_in_addr(struct sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in*)sa)->sin_addr);
+    }
+    
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
 
 int main(int argc, char *argv[])
 {
@@ -76,139 +115,55 @@ int main(int argc, char *argv[])
 	int rv;
 	int numbytes_tx;
 	int numbytes_rx;
-	struct sockaddr_storage their_addr;
+	struct sockaddr_in their_addr;
 	socklen_t addr_len;
 	
 	char *my_server;	// The host server name
-	char *my_port;	// The port we will be using
-	unsigned char request_ID;	// Request ID in range of 0 - 127
-	int num_of_hostnames;
-	char *hostname_list;
-	int hostnames_total_len;
-	char delimiter = '~';
-	unsigned char checksum;
-	int attempts = 0;
+	char *server_port;	// The port we will be using
+	char *my_port;      // The port we are willing to play on
 	
 	// The packet we will send
-	dns_packet packet_out;
+	tx_packet packet_out;
 	
-	if (argc < 5) {
-		fprintf(stderr,"Too few arguments given. Refer to the README.\n");
+	if (argc != 4) {
+		fprintf(stderr,"Incorrect arguments. Refer to the README.\n");
 		exit(1);
 	}
 
 	// Get the params from the command line
 	my_server = argv[1];
-	my_port = argv[2];
-	request_ID = (unsigned char) atoi(argv[3]);
+	server_port = argv[2];
+	my_port = argv[3];
 
-	// Check to make sure the Request ID is in the correct range
-	if (request_ID < 0 || request_ID > 127) 
+	// Check to make sure the Port Number is in the correct range
+	// atoi() - used to convert strings to int
+   if (atoi(my_port) < (10010 + (GROUP_ID * 5))
+         || atoi(my_port) > (10010 + (GROUP_ID * 5) + 4))
 	{
-		fprintf(stderr, "Request ID must be in range of: 0 - 127.\n");
+        printf("Error: Port number was '%s' this is not in range of [",
+               my_port);
+        printf("%d, %d]\n", 10010 + GROUP_ID * 5,
+               10010 + GROUP_ID * 5 + 4);
 		exit(1);
 	}
 
 	if (DEBUG) {
 		printf("----- Parameters -----\n");
 		printf("Server: %s\n", my_server);
-		printf("Port: %s\n", my_port);
-		printf("Request ID: %i\n", request_ID);
-	}
-
-	// Get the size of all the hostnames including space for '~'
-	hostnames_total_len = 0;
-	
-	int y = 4;	// Start at the first index of arg[v] that has a host name
-	for (y; y < argc; y++) 
-	{
-		hostnames_total_len++;	// Add 1 for the '~'
-		hostnames_total_len = hostnames_total_len + strlen(argv[y]);
-		
-	}
-
-	if (DEBUG) {
-		printf("Total Length %i\n", hostnames_total_len);
-	}
-
-	// Create space for all the host names 
-	hostname_list = (char *) malloc(hostnames_total_len);
-
-	num_of_hostnames = argc - 4;
-
-	// Here we create the array used to hold the Host names.
-	char *host_storage[num_of_hostnames];
-	
-
-	if (DEBUG) {
-		printf("Number of hostnames entered: %d\n", num_of_hostnames);
-	}
-
-	int i = 4;	// Start at the first index of arg[v] that has a host name
-	for (i; i < argc; i++) 
-	{
-	
-		if (DEBUG) {
-			printf("Hostname %i: %s\n", i - 3, argv[i]);
-		}
-	
-		// Add the host names to a list so we can reference them later
-		host_storage[i - 4] = argv[i];
-
-		if (DEBUG) {
-			printf("host_storage[%d]: %s\n", i-4, argv[i]);
-		}
-	
-		// Add the delimeter
-		int p = strlen(hostname_list) - strlen(argv[i] - 1);
-		hostname_list[p] = delimiter;
-		
-		// Add the host name
-		strcat(hostname_list, argv[i]);
-
-		if (DEBUG) {
-			printf("Hostnames (combined): %s\n", hostname_list);
-		}
-	}
-
-	if (DEBUG) {
-		printf("sizeof Hostnames (combined): %i\n",(int) sizeof hostname_list);
-		printf("strlen Hostnames (combined): %i\n", (int) strlen(hostname_list));
-		printf("Total Number of host names: %i\n", num_of_hostnames);
+		printf("Server Port: %s\n", server_port);
+		printf("My Port: %s\n", my_port);
 	}
 
 	// Get the Packet Ready to Send
-	packet_out.group_ID = GROUP_ID;
-	packet_out.request_ID = request_ID;
-	strcpy(packet_out.payload, hostname_list);
-
-	packet_out.TML = htons((sizeof packet_out.TML)
-		+ (sizeof packet_out.checksum)
-		+ (sizeof packet_out.group_ID)
-		+ (sizeof packet_out.request_ID)
-		+ (strlen(packet_out.payload)));
+	packet_out.magic_num = htons(0x1234);
+	packet_out.GID_client = GROUP_ID;
+	packet_out.port_num = htons((unsigned short) strtoul(my_port, NULL, 0));
 	
-	// Clear the checksum
-	packet_out.checksum = 0;	
-
-	// Calculate the checksum
-	checksum = calculate_checksum((unsigned char *)&packet_out, ntohs(packet_out.TML));
-	
-	// Set the checksum
-	packet_out.checksum = checksum;	
-
-	if (DEBUG) {
-		printf("Checksum: %X\n", checksum);
-	}
-
 	if (DEBUG) {
 		printf("\n----- Packet Out -----\n");
-		printf("packet_out.TML: %d\n", ntohs(packet_out.TML));
-		printf("packet_out.checksum: %X\n", packet_out.checksum);
-		printf("packet_out.group_ID: %d\n", packet_out.group_ID);
-		printf("packet_out.request_ID: %d\n", packet_out.request_ID);
-		printf("packet_out.payload: %s\n", packet_out.payload);
-		printf("strlen(packet_out.payload): %d\n\n", (int)strlen(packet_out.payload));
+		printf("packet_out.magic_num: %X\n", ntohs(packet_out.magic_num));
+		printf("packet_out.GID_client: %d\n", packet_out.GID_client);
+		printf("packet_out.port_num: %d\n", ntohs(packet_out.port_num));
 
 	}
 	
@@ -216,7 +171,7 @@ int main(int argc, char *argv[])
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_DGRAM;
 
-	if ((rv = getaddrinfo(my_server, my_port, &hints, &servinfo)) != 0) {
+	if ((rv = getaddrinfo(my_server, server_port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return 1;
 	}
@@ -238,10 +193,8 @@ int main(int argc, char *argv[])
 		return 2;
 	}
 
-// Attempt to send a packet, if we recieve an error we try again. Max Attempts = 7
-do
-{
-	if ((numbytes_tx = sendto(sockfd, (char *)&packet_out, ntohs(packet_out.TML), 0, 
+	// Send the data to the server
+	if ((numbytes_tx = sendto(sockfd, (char *)&packet_out, sizeof(packet_out), 0, 
 		p->ai_addr, p->ai_addrlen)) == -1) 
 	{    
 		perror("Error: sendto");
@@ -250,29 +203,116 @@ do
 
 	if (DEBUG) {
 		printf("Sent %d bytes to %s\n", numbytes_tx, argv[1]);
-	}    
-
-	if (DEBUG) {
 		printf("Waiting for responce...\n\n");
 	}
 
 	addr_len = sizeof their_addr;
 
-	// Create the struct used to check if the packet is valid	
-	rx_check rx_verify;
+	// Create the structs needed for receiving a packet	
+	rx_verify rx_check;
+	rx_pair rx_pair_info;
 	
-	// Create the struct used to store the valid packet
-	rx_packet rx_confirmed;
-
-	if ((numbytes_rx = recvfrom(sockfd,(char *) &rx_verify, MAX_PACKET_LEN, 0, 
+	if ((numbytes_rx = recvfrom(sockfd, (char *)&rx_check, MAX_PACKET_LEN, 0, 
 		(struct sockaddr *)&their_addr, &addr_len)) == -1)
 	{
 		perror("recvfrom");
 		exit(1);
 	}
 
-	// Add the null terminator
-	rx_verify.extra[numbytes_rx - 5] = '\0'; // -5 to account for header
+	if (DEBUG) {
+		printf("Incoming Packet Size: %d\n", numbytes_rx);
+	}
+
+	// Check and see if the packet was an error.
+	if (numbytes_rx == 5 && rx_check.extra_char[0] == 0x00)
+	{
+		// Check so see what error is was.
+		char error_code = 0x00;
+		error_code = rx_check.extra_char[1];
+
+		// Incorrect Magic Number
+		if (error_code == 0x01) 
+		{
+			printf("Error: The magic number in the sent request was incorrect.\n");
+			printf("Error code: %X\n", error_code);
+			exit(1);
+		}
+
+		// Incorrect Length 
+		else if (error_code == 0x02) 
+		{
+			printf("Error: The packet length in the sent request was incorrect.\n");
+			printf("Error code: %X\n", error_code);
+			exit(1);
+		}
+
+		// Port not in correct range 
+		else if (error_code == 0x04)
+		{
+			printf("Error: The port in the sent request was not in the correct range.\n");
+			printf("Error code: %X\n", error_code);
+			exit(1);
+		}
+
+		// Unknown error occured.
+		else
+		{
+			printf("Error: An unknown error occured.\n");
+			printf("Error code: %X\n", error_code);
+			exit(1);
+		}
+	}
+
+	// This is a wait packet
+	else if (numbytes_rx == 5)
+	{
+		printf("Need to wait until another client wants to play. Creating TCP Server.\n");
+
+		//TODO: Create a TCP Server with the sent port address. 
+		create_and_run_TCP_server(packet_out);
+
+	}
+
+	// This is a pair packet
+	else if (numbytes_rx == 9)
+	{
+		printf("The server has sent match making information.\n");
+
+		rx_pair_info.magic_num = ntohs(rx_check.short_1);
+		rx_pair_info.GID_server = rx_check.char_2;	
+
+		int IP_in = make_int(rx_check.extra_char[0],
+			rx_check.extra_char[1],
+			rx_check.extra_char[2],
+			rx_check.extra_char[3]);
+
+		rx_pair_info.IP_addr = IP_in;
+		rx_pair_info.port_num = make_short(rx_check.extra_char[4], rx_check.extra_char[5]);
+
+		if (DEBUG) {
+			printf("rx_pair_info.magic_num = %X\n", rx_pair_info.magic_num);
+			printf("rx_pair_info.GID_server = %d\n", rx_pair_info.GID_server);
+			printf("rx_pair_info.IP_addr = %X (", rx_pair_info.IP_addr);
+         printf("%d.%d.%d.%d)\n",
+				(int)(their_addr.sin_addr.s_addr & 0xFF),
+				(int)((their_addr.sin_addr.s_addr & 0xFF00)>>8),
+				(int)((their_addr.sin_addr.s_addr & 0xFF0000)>>16),
+				(int)((their_addr.sin_addr.s_addr & 0xFF000000)>>24));
+			printf("rx_pair_info.port_num = %d\n", rx_pair_info.port_num);
+		}
+
+		//TODO: Connect to a TCP server with the above information.
+		connect_to_TCP_server(rx_pair_info);
+	}
+
+	else
+	{
+		//TODO: This should never happen
+	}
+
+
+
+/*
 
 	// DEBUG: Print the contents of the packet
 	if (DEBUG) {
@@ -400,60 +440,34 @@ do
 		printf("Resending. Attempts: \t%d\n", attempts);
 	}
 
-	
-// End do-while loop
-} while (attempts < 7);
-
+*/	
 	freeaddrinfo(servinfo);
 	close(sockfd);
 
 	return 0;
 }
 
-// Support Functions 
+// Support Functions
+
 /*
-* This function calculates the 1-complement checksum
+* This function combines four bytes to get an int. 
 *
 */
-unsigned char calculate_checksum(unsigned char *data_in, int data_in_length) 
+unsigned int make_int(unsigned char a, unsigned char b, 
+	unsigned char c, unsigned char d) 
 {
-
-	int checksum = 0;
-	int carry = 0;
-	int i;
-
-	for (i = 0; i < data_in_length; i++) 
-	{
-		if (0) {
-			printf("Data[%d]: \t%X\n", i, (int)data_in[i]);
-		}	
+	unsigned int val = 0;
+	val = a;
+	val <<= 8;
+	val |= b;
 	
-		checksum += (int) data_in[i];
-		carry = checksum >> 8;
-		checksum = checksum & 0xFF;
-	
-		if (0) {
-			printf("Before - i:%i \tcarry: %X\t checksum: %X\n", i, carry, checksum);
-		}		
+	val <<= 8;
+	val |= c;
 
-		checksum = checksum + carry;
-		
-		if (0) {
-			printf("After - i:%i \tcarry: %X\t checksum: %X\n", i, carry, checksum);
-		}
-	}
+	val <<= 8;
+	val |= d;	
 
-	if (0) {
-		printf("Real Sum: %X\n", checksum);
-	}
-
-	checksum = ~checksum;
-
-	if (0) {
-		printf("Checksum: %X\n", checksum);
-	}
-
-	return (unsigned char) checksum;
+	return val;
 }
 
 /*
@@ -468,3 +482,253 @@ unsigned short make_short(unsigned char a, unsigned char b)
 	val |= b;
 	return val;
 }
+
+
+int create_and_run_TCP_server(tx_packet server_info)
+{
+	if (DEBUG){
+		printf("Creating TCP Server...\n");
+	}
+
+	int sockfd, new_fd;  // listen on sock_fd, new connection on new_fd
+	struct addrinfo hints, *servinfo, *p;
+	struct sockaddr_storage their_addr; // connector's address information
+	socklen_t sin_size;
+	struct sigaction sa;
+	int yes=1;
+	char s[INET6_ADDRSTRLEN];
+	int rv;
+
+	char my_port[5] = {0};      // The port we are willing to play on
+
+	// Converts the short back to a char*
+	sprintf(my_port, "%d", ntohs(server_info.port_num));
+
+	if (DEBUG) {
+		printf("my_port* = %s\n", my_port);
+	}
+
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE; // use my IP
+	
+	if ((rv = getaddrinfo(NULL, my_port, &hints, &servinfo)) != 0) {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+		return 1;
+	}
+
+	// loop through all the results and bind to the first we can
+	for(p = servinfo; p != NULL; p = p->ai_next) {
+		if ((sockfd = socket(p->ai_family, p->ai_socktype,
+							 p->ai_protocol)) == -1) {
+			perror("server: socket");
+			continue;
+		}
+		
+		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+					   sizeof(int)) == -1) {
+			perror("setsockopt");
+			exit(1);
+		}
+		
+		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+			close(sockfd);
+			perror("server: bind");
+			continue;
+		}
+		
+		break;
+	}
+	
+	if (p == NULL)  {
+		fprintf(stderr, "server: failed to bind\n");
+		return 2;
+	}
+	
+	freeaddrinfo(servinfo); // all done with this structure
+	
+	if (listen(sockfd, BACKLOG) == -1) {
+		perror("listen");
+		exit(1);
+	}
+
+	sa.sa_handler = sigchld_handler; // reap all dead processes
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+		perror("sigaction");
+		exit(1);
+	}
+	
+	printf("server: waiting for connections...\n");
+	
+	int run = 1;
+	
+	while(run == 1) {  // main accept() loop
+		sin_size = sizeof their_addr;
+		new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
+		if (new_fd == -1) {
+			perror("accept");
+			continue;
+		}
+		
+		inet_ntop(their_addr.ss_family,
+				  get_in_addr((struct sockaddr *)&their_addr),
+				  s, sizeof s);
+		printf("server: got connection from %s\n", s);
+		
+		int numbytes;
+		//char newBuf[1000];
+
+		rx_pair newBuf;	
+	
+		if((numbytes = recv(new_fd, (char*)&newBuf, 1000 - 1, 0)) == -1)
+		{
+			perror("recv_error");
+			exit(1);
+		}
+		
+		printf("Message Recieved: %X\n", newBuf.magic_num);
+		
+		if (!fork()) { // this is the child process
+			close(sockfd); // child doesn't need the listener
+			if (send(new_fd, (char*)&newBuf, sizeof(newBuf), 0) == -1)
+				perror("send");
+			close(new_fd);
+			exit(0);
+		}
+		
+		close(new_fd);  // parent doesn't need this
+		
+		printf("Continue? 0=No, 1=Yes\n");
+		scanf("%d", &run);
+	}
+	
+	return 0;
+    
+    
+}
+
+int connect_to_TCP_server(rx_pair server_info_in)
+{
+	int sockfd, numbytes;
+	char buf[MAX_PACKET_LEN];
+	struct addrinfo hints, *servinfo, *p;
+	int status;
+	char s[INET6_ADDRSTRLEN];
+	
+	// Command Line arguments will fill these out
+	char* hostname;
+	char port[5] = {0};      // The port we are willing to play on
+	
+	// Converts the short back to a char*
+	sprintf(port, "%d", server_info_in.port_num);
+
+	// Converts the hex IP address into a char* using dotted notation
+	struct in_addr addr;
+	addr.s_addr = htonl(server_info_in.IP_addr); 
+	hostname = inet_ntoa(addr);
+	
+	if (DEBUG) {
+		printf("hostname: %s\n", hostname);
+		printf("port: %s\n", port);
+	}
+	
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	
+	if ((status = getaddrinfo(hostname, port, &hints, &servinfo)) != 0)
+	{
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
+		return 1;
+	}
+	
+	// Loop through all the results and connect to the first we can
+	for (p = servinfo; p != NULL; p = p->ai_next)
+	{
+		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1)
+		{
+			perror("Socket error");
+			continue;
+		}
+		
+		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+			close(sockfd);
+			perror("Connect error");
+			continue;
+		}
+		
+		break;
+	}
+	
+	if (p == NULL)
+	{
+		fprintf(stderr, "Failed to connect!\n");
+		return 2;
+	}
+	
+	if (DEBUG) {
+		inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr), s, sizeof s);
+		
+		printf("Connected to: %s\n", s);
+	}
+
+	freeaddrinfo(servinfo); 	// All done with this structure
+
+	if (send(sockfd, (char *)&server_info_in, sizeof(server_info_in), 0) == -1)
+	{
+		perror("Send Error");
+	}
+	
+	int numbytes_rec;
+	rx_pair test;	
+	
+	if ((numbytes_rec = recv(sockfd,
+		(char *)&test, MAX_PACKET_LEN, 0)) == -1)
+	{
+		perror("recv error");
+		exit(1);
+	}
+		
+	printf("test.magic_num: %X\n", test.magic_num);
+	
+	close(sockfd);
+	
+	return 0;
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -69,8 +69,8 @@ int main(int argc, char *argv[])
 
 	// Get the Packet Ready to Send
     packet_out.short_1 = htons(0x1234);
-    packet_out.char_1 = 15;
-    packet_out.short_2 = htons(10086);
+    packet_out.char_1 = 2;
+    packet_out.short_2 = htons(10025);
 
 	
 	if (DEBUG) {
