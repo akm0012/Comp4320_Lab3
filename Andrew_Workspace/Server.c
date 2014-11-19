@@ -27,7 +27,7 @@
 #define V_LENGTH 85	// Operation: Count vowels
 #define DISEMVOWEL 170	// Operation: Remove vowels
 
-#define DEBUG 1	// Used for debugging: 1 = ON; 0 = OFF
+#define DEBUG 0	// Used for debugging: 1 = ON; 0 = OFF
 
 #define TRUE 1
 #define FALSE 0

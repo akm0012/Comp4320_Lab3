@@ -29,7 +29,7 @@
 #define MAX_PACKET_LEN 1029	// 1Kb for message, and 5 bytes for header
 #define GROUP_ID 15 
 
-#define DEBUG 1	// Used for debugging 1 = ON, 0 = OFF
+#define DEBUG 0	// Used for debugging 1 = ON, 0 = OFF
 
 
 // Struct that will be used to send data to the Server
@@ -85,11 +85,24 @@ struct incoming_error_packet
 
 typedef struct incoming_error_packet rx_error;
 
+// Struct that is used to contain the a NIM Move
+struct nim_move_packet
+{
+	unsigned short magic_num;
+	unsigned char GID_client;
+	unsigned char row_num;
+	unsigned char tokens_remove;
+} __attribute__((__packed__));
+
+typedef struct nim_move_packet nim_move;
+
 // Prototypes
 unsigned short make_short(unsigned char, unsigned char);
 unsigned int make_int(unsigned char, unsigned char, 
 	unsigned char, unsigned char);
 int create_and_run_TCP_server(tx_packet);
+unsigned char get_char_from_user(char);
+void print_board(int[]);
 
 void sigchld_handler(int s)
 {
@@ -301,7 +314,7 @@ int main(int argc, char *argv[])
 			printf("rx_pair_info.port_num = %d\n", rx_pair_info.port_num);
 		}
 
-		//TODO: Connect to a TCP server with the above information.
+		// Connect to a TCP server with the above information.
 		connect_to_TCP_server(rx_pair_info);
 	}
 
@@ -311,136 +324,6 @@ int main(int argc, char *argv[])
 	}
 
 
-
-/*
-
-	// DEBUG: Print the contents of the packet
-	if (DEBUG) {
-		printf("----- Received Packet -----\n");
-		printf("Packet is %d bytes long.\n", numbytes_rx);
-		printf("rx_verify.b1: \t%d \t(%X)\n", rx_verify.b1, rx_verify.b1);
-		printf("rx_verify.b2: \t%d \t(%X)\n", rx_verify.b2, rx_verify.b2);
-		printf("rx_verify.b3: \t%d \t(%X)\n", rx_verify.b3, rx_verify.b3);
-		printf("rx_verify.b4: \t%d \t(%X)\n", rx_verify.b4, rx_verify.b4);
-		printf("rx_verify.b5: \t%d \t(%X)\n", rx_verify.b5, rx_verify.b5);
-		printf("rx_verify.extra: \t%o\n\n", rx_verify.extra[0]);
-	}
-
-	// Check if we got an error packet from Server
-	
-	if (numbytes_rx == 5)
-	{
-		// Check the checksum of the packet
-		if (calculate_checksum((unsigned char *)&rx_verify, numbytes_rx) != 0x00)
-		{
-			// Checksum Error
-			printf("ERROR: Checksum: '0x%X' did not equal '0x00'\n", 
-				calculate_checksum((unsigned char *)&rx_verify, numbytes_rx));
-		}
-
-		// Checking for Length Error
-		else if (rx_verify.b2 == 127 && rx_verify.b3 == 127
-			&& rx_verify.b4 == 0x00 && rx_verify.b5 == 0x00)
-		{
-			// Server sent error b/c of LENGTH
-			printf("ERROR: Server is reporting a length mismatch.\n");
-		}
-
-		// WARNING: This assumes no group has an ID of 127
-		// Checking for Checksum Error 
-		else if (rx_verify.b2 != 127 && rx_verify.b4 == 0x00
-			&& rx_verify.b5 == 0x00)
-		{
-			// Server sent error b/c of CHECKSUM
-			printf("ERROR: Server is reporting a checksum error. \tGroup ID: %d \tRequest ID: %d\n",
-				rx_verify.b2, rx_verify.b3);
-		}
-
-		attempts++;
-		printf("Resending. Attempts: \t%d\n", attempts);
-	}
-	
-	else if (numbytes_rx > 5)
-	{
-		// This is not an error packet, but still needs to be verified 
-		
-		// Check the checksum of the packet
-		if (calculate_checksum((unsigned char *)&rx_verify, numbytes_rx) != 0x00)
-		{
-			// Checksum Error
-			printf("ERROR: Checksum: '0x%X' did not equal '0x00'\n", 
-				calculate_checksum((unsigned char *)&rx_verify, numbytes_rx));
-		
-			attempts++;
-			printf("Resending. Attempts: \t%d\n", attempts);
-		}
-
-		// Check to make sure the length of the packet matches the num of bytes received 
-		else if (numbytes_rx != make_short(rx_verify.b1, rx_verify.b2))
-		{
-			// Length Mismatch Error
-			printf("ERROR: Length mismatch: Packet.TML: %d did not match bytes received: %d\n", 
-				make_short(rx_verify.b1, rx_verify.b2), numbytes_rx);
-		
-			attempts++;
-			printf("Resending. Attempts: \t%d\n", attempts);
-		}
-
-		else 
-		{
-			// Make attempts 10 so we don't try again.
-			attempts = 10;
-			
-			// We have a valid packet
-			rx_confirmed.length = make_short(rx_verify.b1, rx_verify.b2);
-			rx_confirmed.checksum = rx_verify.b3;
-			rx_confirmed.GID = rx_verify.b4;
-			rx_confirmed.RID = rx_verify.b5;
-			
-			// Determine how many IP Address we have
-			int IP_addresses_in;
-			IP_addresses_in = (rx_confirmed.length - 5) / 4;
-
-			// Get the 4 byte IP addresses
-			int y;
-			for (y = 0; y < IP_addresses_in ; y++)
-			{
-				rx_confirmed.payload[y] = rx_verify.extra[y];
-			}
-
-			if (DEBUG) {
-				printf("rx_confirmed.length: \t%d \t(%X)\n", rx_confirmed.length, rx_confirmed.length);
-				printf("rx_confirmed.checksum: \t%d \t(%X)\n", rx_confirmed.checksum, rx_confirmed.checksum);
-				printf("rx_confirmed.GID: \t%d \t(%X)\n", rx_confirmed.GID, rx_confirmed.GID);
-				printf("rx_confirmed.RID: \t%d \t(%X)\n", rx_confirmed.RID, rx_confirmed.RID);
-				printf("rx_confirmed contains %d IP Addresses.\n", (rx_confirmed.length - 5) / 4);
-			}
-			
-			// Get the 4 byte IP addresses
-			for (y = 0; y < IP_addresses_in ; y++)
-			{
-				uint32_t ip = rx_confirmed.payload[y];
-				struct in_addr ip_addr;
-				ip_addr.s_addr = ip;
-				// inet_ntoa takes care of the network byte order
-				printf("%s: %s\n", host_storage[y],  inet_ntoa(ip_addr)); 
-				
-			}
-			
-		}
-
-	} 
-
-	else 
-	{
-		// This packet is too short for any valid respose
-		printf("ERROR: Packet too short.\n"); 
-		
-		attempts++;
-		printf("Resending. Attempts: \t%d\n", attempts);
-	}
-
-*/	
 	freeaddrinfo(servinfo);
 	close(sockfd);
 
@@ -498,9 +381,12 @@ int create_and_run_TCP_server(tx_packet server_info)
 	int yes=1;
 	char s[INET6_ADDRSTRLEN];
 	int rv;
+	nim_move move_in, move_out;
 
 	char my_port[5] = {0};      // The port we are willing to play on
 
+	int tokens[4];
+	
 	// Converts the short back to a char*
 	sprintf(my_port, "%d", ntohs(server_info.port_num));
 
@@ -560,50 +446,159 @@ int create_and_run_TCP_server(tx_packet server_info)
 		perror("sigaction");
 		exit(1);
 	}
-	
-	printf("server: waiting for connections...\n");
-	
-	int run = 1;
-	
-	while(run == 1) {  // main accept() loop
+
+	if (DEBUG) {	
+		printf("server: waiting for connections...\n");
+	}	
+
+	// Print game board, wait for first move from other client 
+
+	// Initialize the game
+	tokens[0] = 1;
+	tokens[1] = 3;
+	tokens[2] = 5;
+	tokens[3] = 7;
+
+	print_board(tokens);
+
+	int token_count = count_array(tokens);
+
 		sin_size = sizeof their_addr;
 		new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
 		if (new_fd == -1) {
 			perror("accept");
-			continue;
+		//	continue;
 		}
 		
 		inet_ntop(their_addr.ss_family,
 				  get_in_addr((struct sockaddr *)&their_addr),
 				  s, sizeof s);
-		printf("server: got connection from %s\n", s);
-		
-		int numbytes;
-		//char newBuf[1000];
+		if (DEBUG) {
+			printf("server: got connection from %s\n", s);
+		}		
+	do 
+	{  // main accept() loop
 
-		rx_pair newBuf;	
-	
-		if((numbytes = recv(new_fd, (char*)&newBuf, 1000 - 1, 0)) == -1)
+
+		if (DEBUG) {
+			printf("Waiting to recv...\n");
+		}		
+		if((recv(new_fd, (char*)&move_in, sizeof(move_in), 0)) == -1)
 		{
 			perror("recv_error");
 			exit(1);
 		}
 		
-		printf("Message Recieved: %X\n", newBuf.magic_num);
+		if (DEBUG) {
+			printf("\n-----Recieved a move!-----\n");
+			printf("Magic Number: %X\n", ntohs(move_in.magic_num));
+			printf("Client GID: %d\n", move_in.GID_client);
+			printf("Row Number: %d\n", move_in.row_num);
+			printf("Tokens to Remove: %d\n\n", move_in.tokens_remove);
+		}		
+
+		// Check for errors, or if we sent an error  
 		
-		if (!fork()) { // this is the child process
-			close(sockfd); // child doesn't need the listener
-			if (send(new_fd, (char*)&newBuf, sizeof(newBuf), 0) == -1)
-				perror("send");
-			close(new_fd);
-			exit(0);
+		// Check and see if we sent a bad move
+		if (move_in.row_num == 0xFF && move_in.tokens_remove == 0xFF)
+		{
+			print_board(tokens);	
+			printf("You sent an invalid move. Please make your move again.\n");
+			move_out.magic_num = htons(0x1234);
+			move_out.GID_client = GROUP_ID;
+			move_out.row_num = get_char_from_user('r');
+			move_out.tokens_remove = get_char_from_user('t');
+		}
+
+		// Else they sent us a move and we need to check if it is valid
+		else
+		{
+			if (move_in.row_num < 1 || move_in.row_num > 4 )
+			{
+				// Row out of range
+				// Send an error packet 
+				move_out.magic_num = htons(0x1234);
+				move_out.GID_client = GROUP_ID;
+				move_out.row_num = 0xFF;
+				move_out.tokens_remove = 0xFF;
+			}
+
+			else if (move_in.tokens_remove > tokens[move_in.row_num - 1])
+			{
+				// Trying to remove more tokens than are present
+				// Send an error packet 
+				move_out.magic_num = htons(0x1234);
+				move_out.GID_client = GROUP_ID;
+				move_out.row_num = 0xFF;
+				move_out.tokens_remove = 0xFF;
+			}
+
+			else
+			{
+				// A Valid move was made. Update the game board.
+				tokens[move_in.row_num - 1] = 
+					tokens[move_in.row_num - 1] - move_in.tokens_remove;
+
+				print_board(tokens);	
+	
+				if (count_array(tokens) != 0) {
+					// Have the user enter the next move	
+					move_out.magic_num = htons(0x1234);
+					move_out.GID_client = GROUP_ID;
+					move_out.row_num = get_char_from_user('r');
+					move_out.tokens_remove = get_char_from_user('t');
+				
+					printf("Move Sent.\n");
+				}
+
+				// GAME OVER, You lose. 
+				else
+				{
+					printf("\n----- GAME OVER -----\n");
+					printf("\n----- You Lost! -----\n");
+					close(sockfd);
+					exit(1);
+				}
+			}
+
+		}
+
+		if (DEBUG) {
+			printf("\n-----Sending move.-----\n");
+			printf("Magic Number: %X\n", ntohs(move_out.magic_num));
+			printf("Client GID: %d\n", move_out.GID_client);
+			printf("Row Number: %d\n", move_out.row_num);
+			printf("Tokens to Remove: %d\n\n", move_out.tokens_remove);
 		}
 		
-		close(new_fd);  // parent doesn't need this
+		if (send(new_fd, (char*)&move_out, sizeof(move_out), 0) == -1){
+			perror("send");
+		}
 		
-		printf("Continue? 0=No, 1=Yes\n");
-		scanf("%d", &run);
-	}
+		
+		if (DEBUG) {
+			printf("Sent.\n");
+		}
+
+		// Check and see if we sent a valid packet
+		// This is here just so the we can know who won the game
+		if (move_out.row_num > 0 && move_out.row_num < 5
+			&& move_out.tokens_remove <= tokens[move_out.row_num - 1])
+		{
+
+			// Update the game board
+			tokens[move_out.row_num - 1] = 
+				tokens[move_out.row_num - 1] - move_out.tokens_remove;
+
+			// Check to see if there are still tokens on the board
+			token_count = count_array(tokens);
+		}
+
+	} while (token_count != 0);
+
+	// Token Count == 0; You Win!
+	printf("\n----- GAME OVER -----\n");
+	printf("\n----- You WON! -----\n");
 	
 	return 0;
     
@@ -612,15 +607,21 @@ int create_and_run_TCP_server(tx_packet server_info)
 
 int connect_to_TCP_server(rx_pair server_info_in)
 {
+	if(DEBUG) {
+		printf("CONNECT_TO_TCP_SERVER() fx()\n");
+	}
+
 	int sockfd, numbytes;
 	char buf[MAX_PACKET_LEN];
 	struct addrinfo hints, *servinfo, *p;
 	int status;
 	char s[INET6_ADDRSTRLEN];
 	
-	// Command Line arguments will fill these out
 	char* hostname;
 	char port[5] = {0};      // The port we are willing to play on
+
+	int tokens[4];
+	nim_move move_out, move_in;
 	
 	// Converts the short back to a char*
 	sprintf(port, "%d", server_info_in.port_num);
@@ -677,30 +678,276 @@ int connect_to_TCP_server(rx_pair server_info_in)
 
 	freeaddrinfo(servinfo); 	// All done with this structure
 
-	if (send(sockfd, (char *)&server_info_in, sizeof(server_info_in), 0) == -1)
+	// Initliaize game
+	tokens[0] = 1;
+	tokens[1] = 3;
+	tokens[2] = 5;
+	tokens[3] = 7;
+
+	// Print out game board
+	print_board(tokens);
+
+	int token_count = count_array(tokens);
+
+	move_out.magic_num = htons(0x1234);
+	move_out.GID_client = GROUP_ID;
+	move_out.row_num = get_char_from_user('r');
+	move_out.tokens_remove = get_char_from_user('t');
+
+	if (DEBUG) {
+		printf("\n-----Sending move.-----\n");
+		printf("Magic Number: %X\n", ntohs(move_out.magic_num));
+		printf("Client GID: %d\n", move_out.GID_client);
+		printf("Row Number: %d\n", move_out.row_num);
+		printf("Tokens to Remove: %d\n\n", move_out.tokens_remove);
+	}
+
+
+	if (send(sockfd, (char *)&move_out, sizeof(move_out), 0) == -1)
 	{
 		perror("Send Error");
 	}
+
+	printf("Move Sent.\n");
 	
-	int numbytes_rec;
-	rx_pair test;	
-	
-	if ((numbytes_rec = recv(sockfd,
-		(char *)&test, MAX_PACKET_LEN, 0)) == -1)
+	// Check and see if we sent a valid packet
+	if (move_out.row_num > 0 && move_out.row_num < 5
+		&& move_out.tokens_remove <= tokens[move_out.row_num - 1])
 	{
-		perror("recv error");
-		exit(1);
-	}
-		
-	printf("test.magic_num: %X\n", test.magic_num);
+		// Update the game board
+		tokens[move_out.row_num - 1] = 
+			tokens[move_out.row_num - 1] - move_out.tokens_remove;
+
+		// Update token count
+		token_count = count_array(tokens);
+
+	}	
+
+	do
+	{	// Main Loop 
+
+		// Get user input to make the first move
 	
-	close(sockfd);
+
+		
+
+		if (DEBUG) {
+			printf("Waiting to recv...\n");
+		}
+		if ((recv(sockfd, (char *)&move_in, sizeof(move_in), 0)) == -1)
+		{
+			perror("recv error");
+			exit(1);
+		}
+		
+		if (DEBUG) {
+			printf("\n-----Recieved a move!-----\n");
+			printf("Magic Number: %X\n", ntohs(move_in.magic_num));
+			printf("Client GID: %d\n", move_in.GID_client);
+			printf("Row Number: %d\n", move_in.row_num);
+			printf("Tokens to Remove: %d\n\n", move_in.tokens_remove);
+		}		
+
+		// Check for errors, or if we sent an error  
+		
+		// Check and see if we sent a bad move
+		if (move_in.row_num == 0xFF && move_in.tokens_remove == 0xFF)
+		{
+			print_board(tokens);	
+			printf("You sent an invalid move. Please make your move again.\n");
+			move_out.magic_num = htons(0x1234);
+			move_out.GID_client = GROUP_ID;
+			move_out.row_num = get_char_from_user('r');
+			move_out.tokens_remove = get_char_from_user('t');
+		}
+
+		// Else they sent us a move and we need to check if it is valid
+		else
+		{
+			if (move_in.row_num < 1 || move_in.row_num > 4 )
+			{
+				// Row out of range
+				// Send an error packet 
+				move_out.magic_num = htons(0x1234);
+				move_out.GID_client = GROUP_ID;
+				move_out.row_num = 0xFF;
+				move_out.tokens_remove = 0xFF;
+			}
+
+			else if (move_in.tokens_remove > tokens[move_in.row_num - 1])
+			{
+				// Trying to remove more tokens than are present
+				// Send an error packet 
+				move_out.magic_num = htons(0x1234);
+				move_out.GID_client = GROUP_ID;
+				move_out.row_num = 0xFF;
+				move_out.tokens_remove = 0xFF;
+			}
+
+			else
+			{
+				// A Valid move was made. Update the game board.
+				tokens[move_in.row_num - 1] = 
+					tokens[move_in.row_num - 1] - move_in.tokens_remove;
+
+				print_board(tokens);	
+	
+				if (count_array(tokens) != 0) {
+					// Have the user enter the next move	
+					move_out.magic_num = htons(0x1234);
+					move_out.GID_client = GROUP_ID;
+					move_out.row_num = get_char_from_user('r');
+					move_out.tokens_remove = get_char_from_user('t');
+					printf("Move Sent.\n");
+				}
+
+				// GAME OVER, You lose. 
+				else
+				{
+					printf("\n----- GAME OVER -----\n");
+					printf("\n----- You Lost! -----\n");
+					close(sockfd);
+					exit(1);
+				}
+			}
+
+		}
+
+
+		if (DEBUG) {
+			printf("\n-----Sending move.-----\n");
+			printf("Magic Number: %X\n", ntohs(move_out.magic_num));
+			printf("Client GID: %d\n", move_out.GID_client);
+			printf("Row Number: %d\n", move_out.row_num);
+			printf("Tokens to Remove: %d\n\n", move_out.tokens_remove);
+		}
+
+		if (send(sockfd, (char *)&move_out, sizeof(move_out), 0) == -1)
+		{
+			perror("Send Error");
+		}
+
+		// Check and see if we sent a valid packet
+		// This is here just so the we can know who won the game
+		if (move_out.row_num > 0 && move_out.row_num < 5
+			&& move_out.tokens_remove <= tokens[move_out.row_num - 1])
+		{
+
+			// Update the game board
+			tokens[move_out.row_num - 1] = 
+				tokens[move_out.row_num - 1] - move_out.tokens_remove;
+
+			// Check to see if there are still tokens on the board
+			token_count = count_array(tokens);
+		}
+
+	} while (token_count != 0);
+
+	// Token Count == 0; You Win!
+	printf("\n----- GAME OVER -----\n");
+	printf("\n----- You WON! -----\n");
 	
 	return 0;
+}
+
+/**
+*	Returns the number of elements in the array.	
+*	@param array_in: The array you want to count. 
+*/
+int count_array(int array_in[4])
+{
+	int sum = 0;
+	int i = 0;
+	for (i; i < 4; i++)
+	{
+		sum = sum + array_in[i];
+	}
+
+	return sum;
+}
+
+/**
+*	Prints the game board.
+*
+*	@param tokens: The array holding the tokens count
+*/
+void print_board(int tokens[4])
+{
+	printf("\nRow #\t: Number of Tokens\n");
+	
+	int i = 0;
+	for (i; i < 4; i++) {
+		printf("%d\t: %d\n", i + 1, tokens[i]);
+	}
 
 }
 
+/**
+*	Asks the user for data input for this game.
+*
+*	@param x: Whether we want the row or tokens. 
+*/
+unsigned char get_char_from_user(char x)
+{
+	int char_out;
+	int iterations = 0;
 
+	char_out = 0;
+
+	do {
+
+	if (iterations != 0)
+		{
+			printf("Invalid input. Try Again.\n");
+		}
+
+		if (x == 'r')
+		{
+			if (0) {
+				printf("Getting Row from user.\n");
+			}
+
+			printf("Enter the row number: ");
+			if (scanf("%d", &char_out) == 0)
+			{
+				char c;
+				while ((c = getchar()) != '\n'){
+					// Clear buffer
+				}
+			}
+		}
+
+		else if (x == 't')
+		{
+			if (0) {
+				printf("Getting Tokens to delete from user.\n");
+			}
+
+			printf("Enter number of tokens you wish to delete: ");
+			if (scanf("%d", &char_out) == 0)
+			{
+				char c;
+				while ((c = getchar()) != '\n'){
+					// Clear buffer
+				}
+			}
+		}	
+
+		else
+		{
+			printf("Error: Unknown parameter in get_char_from_user()\n");
+			exit(1);
+		}
+
+		if (0) {
+			printf("char_out: %d\n", char_out);
+		}
+	
+		iterations++;
+
+	} while (char_out < 1 || char_out > 7);
+	return (unsigned char) char_out;
+}
 
 
 
